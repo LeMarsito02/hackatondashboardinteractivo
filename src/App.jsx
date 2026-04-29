@@ -1,68 +1,24 @@
 import { useEffect, useMemo, useState } from 'react'
 import { hasSupabaseCredentials, supabase } from './supabaseClient'
-
-const LEVELS = [
-  { max: 1, label: 'NORMAL', color: '#16a34a' },
-  { max: 2, label: 'MEDIA', color: '#ca8a04' },
-  { max: 4, label: 'ALTA', color: '#ea580c' },
-  { max: 5, label: 'CRÍTICA', color: '#dc2626' },
-]
+import { baseFilters, formatTime } from './utils/dashboard'
+import { AlertCard, AlertDetailPanel, AlertsTable, KpiCard } from './components'
 
 const STORAGE_BUCKET = import.meta.env.VITE_SUPABASE_STORAGE_BUCKET || 'security-snapshots'
-
-const levelFromPriority = (priority = 0) => LEVELS.find((l) => priority <= l.max) ?? LEVELS[0]
-const formatTime = (iso) => (iso ? new Date(iso).toLocaleString() : 'Sin fecha')
-
-const baseFilters = { camera: 'all', priority: 'all', status: 'all', falsePositive: 'all' }
-
-const isHttpUrl = (value) => typeof value === 'string' && /^https?:\/\//i.test(value)
-
-const pickImagePath = (event) => {
-  if (!event) return null
-  return event.image_path || event.storage_path || event.snapshot_path || event.file_path || event.image_key || null
-}
+const isHttpUrl = (v) => typeof v === 'string' && /^https?:\/\//i.test(v)
+const pickImagePath = (e) => e?.image_path || e?.storage_path || e?.snapshot_path || e?.file_path || e?.image_key || null
 
 async function resolveImageUrl(event) {
   const direct = event.image_url || event.snapshot_url
   if (isHttpUrl(direct)) return direct
-
-  const relativePath = pickImagePath(event)
-  if (!relativePath || !supabase) return null
-
-  const cleanedPath = relativePath.replace(/^\/+/, '')
-
-  const { data: signedData, error: signedError } = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .createSignedUrl(cleanedPath, 60 * 60)
-
-  if (!signedError && signedData?.signedUrl) return signedData.signedUrl
-
-  const { data: publicData } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(cleanedPath)
-  return publicData?.publicUrl || null
+  const path = pickImagePath(event)
+  if (!path || !supabase) return null
+  const clean = path.replace(/^\/+/, '')
+  const { data } = await supabase.storage.from(STORAGE_BUCKET).createSignedUrl(clean, 3600)
+  if (data?.signedUrl) return data.signedUrl
+  return supabase.storage.from(STORAGE_BUCKET).getPublicUrl(clean).data?.publicUrl || null
 }
+const enrichEvent = async (event) => ({ ...event, _resolvedImageUrl: await resolveImageUrl(event) })
 
-async function enrichEvent(event) {
-  const resolvedImage = await resolveImageUrl(event)
-  return { ...event, _resolvedImageUrl: resolvedImage }
-}
-
-
-
-function parseGeminiAnalysis(raw) {
-  if (!raw) return null
-  if (typeof raw === 'object') return raw
-  if (typeof raw !== 'string') return null
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return null
-  }
-}
-
-function eventDescription(event) {
-  const analysis = parseGeminiAnalysis(event.gemini_analysis)
-  return analysis?.descripcion || event.gemini_description || event.description || 'Sin descripción'
-}
 export default function App() {
   const [events, setEvents] = useState([])
   const [cameras, setCameras] = useState([])
@@ -70,227 +26,78 @@ export default function App() {
   const [selectedEvent, setSelectedEvent] = useState(null)
   const [filters, setFilters] = useState(baseFilters)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [view, setView] = useState('cards')
+  const [connection, setConnection] = useState('live')
+
+  const loadData = async () => {
+    if (!supabase) return
+    setLoading(true)
+    const [e, c, h] = await Promise.all([
+      supabase.from('security_events').select('*').order('created_at', { ascending: false }).limit(150),
+      supabase.from('cameras').select('*'),
+      supabase.from('camera_heartbeats').select('*').order('created_at', { ascending: false }).limit(200),
+    ])
+    if (e.error) setError(e.error.message)
+    else setEvents(await Promise.all((e.data || []).map(enrichEvent)))
+    if (!c.error) setCameras(c.data || [])
+    if (!h.error) setHeartbeats(h.data || [])
+    setLoading(false)
+  }
 
   useEffect(() => {
-    if (!supabase) {
-      setLoading(false)
-      return
-    }
-
-    const loadData = async () => {
-      setLoading(true)
-      const [eventsRes, camerasRes, heartbeatsRes] = await Promise.all([
-        supabase.from('security_events').select('*').order('created_at', { ascending: false }).limit(120),
-        supabase.from('cameras').select('*').order('created_at', { ascending: false }),
-        supabase.from('camera_heartbeats').select('*').order('created_at', { ascending: false }).limit(200),
-      ])
-
-      if (!eventsRes.error) {
-        const hydrated = await Promise.all((eventsRes.data || []).map(enrichEvent))
-        setEvents(hydrated)
-      }
-      if (!camerasRes.error) setCameras(camerasRes.data || [])
-      if (!heartbeatsRes.error) setHeartbeats(heartbeatsRes.data || [])
-      setLoading(false)
-    }
-
+    if (!supabase) { setLoading(false); return }
     loadData()
-
-    const eventsChannel = supabase
-      .channel('security-events-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'security_events' }, async (payload) => {
-        if (payload.eventType === 'INSERT') {
-          const incoming = await enrichEvent(payload.new)
-          setEvents((current) => [incoming, ...current])
-          return
-        }
-
-        if (payload.eventType === 'UPDATE') {
-          const incoming = await enrichEvent(payload.new)
-          setEvents((current) => current.map((e) => (e.id === incoming.id ? incoming : e)))
-          setSelectedEvent((current) => (current?.id === incoming.id ? incoming : current))
-          return
-        }
-
-        if (payload.eventType === 'DELETE') {
-          setEvents((current) => current.filter((e) => e.id !== payload.old.id))
-          setSelectedEvent((current) => (current?.id === payload.old.id ? null : current))
-        }
-      })
-      .subscribe()
-
-    const heartbeatsChannel = supabase
-      .channel('camera-heartbeats-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'camera_heartbeats' }, (payload) => {
-        setHeartbeats((current) => {
-          if (payload.eventType === 'INSERT') return [payload.new, ...current]
-          if (payload.eventType === 'UPDATE') return current.map((h) => (h.id === payload.new.id ? payload.new : h))
-          if (payload.eventType === 'DELETE') return current.filter((h) => h.id !== payload.old.id)
-          return current
-        })
-      })
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(eventsChannel)
-      supabase.removeChannel(heartbeatsChannel)
-    }
+    const ch = supabase.channel('security-events-live').on('postgres_changes', { event: '*', schema: 'public', table: 'security_events' }, async (p) => {
+      if (p.eventType === 'INSERT') {
+        const incoming = await enrichEvent(p.new)
+        setEvents((x) => [incoming, ...x])
+      }
+      if (p.eventType === 'UPDATE') {
+        const incoming = await enrichEvent(p.new)
+        setEvents((x) => x.map((i) => (i.id === incoming.id ? incoming : i)))
+        setSelectedEvent((s) => (s?.id === incoming.id ? incoming : s))
+      }
+      if (p.eventType === 'DELETE') setEvents((x) => x.filter((i) => i.id !== p.old.id))
+    }).subscribe((s) => setConnection(s === 'SUBSCRIBED' ? 'live' : 'reconnecting'))
+    return () => supabase.removeChannel(ch)
   }, [])
 
-  const filteredEvents = useMemo(() => events.filter((event) => {
-    const priority = event.final_priority ?? event.priority ?? 0
-    const eventStatus = event.status ?? 'pending'
-    const isFalsePositive = Boolean(event.false_positive)
-
-    if (filters.camera !== 'all' && (event.camera_id || event.camera_name) !== filters.camera) return false
-    if (filters.priority !== 'all' && String(priority) !== filters.priority) return false
-    if (filters.status !== 'all' && eventStatus !== filters.status) return false
-    if (filters.falsePositive !== 'all' && String(isFalsePositive) !== filters.falsePositive) return false
+  const filteredEvents = useMemo(() => events.filter((e) => {
+    const p = e.final_priority ?? e.priority ?? 0
+    const s = e.status ?? 'pending'
+    const fp = Boolean(e.false_positive)
+    if (filters.camera !== 'all' && (e.camera_id || e.camera_name) !== filters.camera) return false
+    if (filters.priority !== 'all' && String(p) !== filters.priority) return false
+    if (filters.status !== 'all' && s !== filters.status) return false
+    if (filters.falsePositive !== 'all' && String(fp) !== filters.falsePositive) return false
+    if (filters.query && !`${e.description || ''} ${e.address || e.location || ''}`.toLowerCase().includes(filters.query.toLowerCase())) return false
     return true
   }), [events, filters])
 
-  const kpis = useMemo(() => {
-    const today = new Date().toDateString()
-    const todayEvents = events.filter((e) => new Date(e.created_at).toDateString() === today)
-    const lastEvent = events[0]
-
-    return {
-      today: todayEvents.length,
-      critical: events.filter((e) => (e.final_priority ?? e.priority ?? 0) >= 5).length,
-      pending: events.filter((e) => (e.status ?? 'pending') === 'pending').length,
-      falsePositive: events.filter((e) => e.false_positive).length,
-      activeCameras: cameras.filter((c) => c.is_active).length,
-      lastAlert: lastEvent?.created_at,
-    }
-  }, [events, cameras])
-
-  const latestHeartbeatByCamera = useMemo(() => heartbeats.reduce((acc, hb) => {
-    if (!acc[hb.camera_id]) acc[hb.camera_id] = hb
-    return acc
-  }, {}), [heartbeats])
+  const kpis = useMemo(() => ({
+    today: events.filter((e) => new Date(e.created_at).toDateString() === new Date().toDateString()).length,
+    critical: events.filter((e) => (e.final_priority ?? e.priority ?? 0) >= 5).length,
+    pending: events.filter((e) => (e.status ?? 'pending') === 'pending').length,
+    falsePositive: events.filter((e) => e.false_positive).length,
+    activeCameras: cameras.filter((c) => c.is_active).length,
+    lastAlert: events[0]?.created_at,
+  }), [events, cameras])
 
   const updateEventStatus = async (event, status, falsePositive = false, confirmedThreat = false) => {
-    if (!supabase) return
-
-    const patch = {
-      status,
-      reviewed: true,
-      reviewed_at: new Date().toISOString(),
-      false_positive: falsePositive,
-      confirmed_threat: confirmedThreat,
-    }
-
-    await supabase.from('security_events').update(patch).eq('id', event.id)
-    await supabase.from('event_reviews').insert({
-      event_id: event.id,
-      reviewer_name: 'Operador Dashboard',
-      action: status,
-      notes: `Acción rápida desde dashboard: ${status}`,
-    })
+    const { error: up } = await supabase.from('security_events').update({ status, reviewed: true, reviewed_at: new Date().toISOString(), false_positive: falsePositive, confirmed_threat: confirmedThreat }).eq('id', event.id)
+    if (up) return setError(up.message)
+    const { error: rev } = await supabase.from('event_reviews').insert({ event_id: event.id, reviewer_name: 'Operador Dashboard', action: status, notes: `Acción rápida desde dashboard: ${status}` })
+    if (rev) setError(rev.message)
   }
 
-  return (
-    <div className="container">
-      <header>
-        <h1>🎛️ Centro de Control de Cámaras</h1>
-        <p>Alertas en vivo, revisión humana y estado operativo en tiempo real con Supabase Realtime.</p>
-      </header>
+  const camerasDerived = cameras.length ? cameras : [...new Map(events.map((e) => [e.camera_id || e.camera_name, { id: e.camera_id || e.camera_name, name: e.camera_name || e.camera_id, address: e.address || e.location }])).values()]
 
-      {!hasSupabaseCredentials && <div className="warning">Configura VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY.</div>}
-
-      <section className="kpi-grid">
-        <KPI title="Alertas hoy" value={kpis.today} /><KPI title="Críticas" value={kpis.critical} /><KPI title="Pendientes" value={kpis.pending} />
-        <KPI title="Falsos positivos" value={kpis.falsePositive} /><KPI title="Cámaras activas" value={kpis.activeCameras} />
-        <KPI title="Última alerta" value={kpis.lastAlert ? formatTime(kpis.lastAlert) : 'N/A'} />
-      </section>
-
-      <section className="panel"><h2>Filtros</h2><div className="filters">
-        <select onChange={(e) => setFilters((f) => ({ ...f, camera: e.target.value }))}><option value="all">Todas las cámaras</option>
-          {[...new Set(events.map((e) => e.camera_id || e.camera_name).filter(Boolean))].map((camera) => <option key={camera} value={camera}>{camera}</option>)}
-        </select>
-        <select onChange={(e) => setFilters((f) => ({ ...f, priority: e.target.value }))}><option value="all">Todas las prioridades</option>{[0, 1, 2, 3, 4, 5].map((p) => <option key={p} value={String(p)}>{p}</option>)}</select>
-        <select onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}><option value="all">Todos los estados</option>{['pending', 'reviewing', 'confirmed', 'false_positive', 'resolved', 'ignored'].map((s) => <option key={s} value={s}>{s}</option>)}</select>
-        <select onChange={(e) => setFilters((f) => ({ ...f, falsePositive: e.target.value }))}><option value="all">Falso positivo: todos</option><option value="true">Sí</option><option value="false">No</option></select>
-      </div></section>
-
-      <main className="layout">
-        <section className="panel live-alerts">
-          <h2>🚨 Alertas en vivo</h2>
-          {loading && <p>Cargando...</p>}
-          {!loading && filteredEvents.length === 0 && <p>Sin alertas para los filtros seleccionados.</p>}
-          <div className="cards">
-            {filteredEvents.map((event) => {
-              const priority = event.final_priority ?? event.priority ?? 0
-              const level = levelFromPriority(priority)
-              return (
-                <article key={event.id} className="card" onClick={() => setSelectedEvent(event)}>
-                  {event._resolvedImageUrl ? <img src={event._resolvedImageUrl} alt="Evento" loading="lazy" /> : <div className="image-placeholder">Sin imagen</div>}
-                  <h3>{event.camera_name || event.camera_id || 'Cámara sin nombre'}</h3>
-                  <p><strong>Ubicación:</strong> {event.address || 'Sin dirección'}</p>
-                  <p><strong>Prioridad:</strong> {priority}/5</p>
-                  <p><strong>Nivel:</strong> <span style={{ color: level.color }}>{level.label}</span></p>
-                  <p><strong>Gemini:</strong> {eventDescription(event)}</p>
-                  <p><strong>Estado:</strong> {event.status || 'pending'}</p>
-                  <p><strong>Hora:</strong> {formatTime(event.created_at)}</p>
-                  <div className="buttons" onClick={(e) => e.stopPropagation()}>
-                    <button onClick={() => updateEventStatus(event, 'confirmed', false, true)}>Confirmar</button>
-                    <button onClick={() => updateEventStatus(event, 'false_positive', true, false)}>Falso positivo</button>
-                    <button onClick={() => updateEventStatus(event, 'resolved')}>Revisado</button>
-                  </div>
-                </article>
-              )
-            })}
-          </div>
-        </section>
-
-        <aside className="stack">
-          <section className="panel"><h2>🗺️ Mapa de cámaras (lista geográfica MVP)</h2><div className="map-list">
-            {cameras.map((camera) => {
-              const cameraEvents = events.filter((event) => (event.camera_id || event.camera_name) === camera.id)
-              const latest = cameraEvents[0]
-              const priority = latest ? (latest.final_priority ?? latest.priority ?? 0) : 0
-              const level = levelFromPriority(priority)
-              return <div key={camera.id} className="map-item" onClick={() => latest && setSelectedEvent(latest)}><div className="dot" style={{ background: level.color }} /><div><strong>{camera.name}</strong><p>{camera.address || `${camera.lat}, ${camera.lon}`}</p><small>Última alerta: {latest ? formatTime(latest.created_at) : 'Sin alertas'}</small></div></div>
-            })}
-          </div></section>
-
-          <section className="panel"><h2>📡 Estado de cámaras</h2>
-            {cameras.map((camera) => {
-              const hb = latestHeartbeatByCamera[camera.id]
-              return <div key={camera.id} className="heartbeat-item"><strong>{camera.name}</strong><small>{hb ? `${hb.status} · ${formatTime(hb.created_at)}` : 'Sin heartbeat'}</small></div>
-            })}
-          </section>
-        </aside>
-      </main>
-
-      {selectedEvent && (
-        <section className="panel detail">
-          <h2>Detalle del evento</h2>
-          {selectedEvent._resolvedImageUrl && <img className="detail-image" src={selectedEvent._resolvedImageUrl} alt="Detalle evento" />}
-          <p><strong>ID:</strong> {selectedEvent.id}</p>
-          <p><strong>Cámara:</strong> {selectedEvent.camera_name || selectedEvent.camera_id}</p>
-          <p><strong>Descripción Gemini:</strong> {eventDescription(selectedEvent)}</p>
-          <p><strong>Objetos detectados:</strong> {selectedEvent.detected_objects?.join(', ') || 'Sin objetos'}</p>
-          <p><strong>Notas operador:</strong> {selectedEvent.operator_notes || 'Sin notas'}</p>
-          {parseGeminiAnalysis(selectedEvent.gemini_analysis) && (
-            <div className="analysis-box">
-              <p><strong>Tipo de emergencia:</strong> {parseGeminiAnalysis(selectedEvent.gemini_analysis).tipo_emergencia || 'N/A'}</p>
-              <p><strong>Emergencia detectada:</strong> {String(parseGeminiAnalysis(selectedEvent.gemini_analysis).emergencia_detectada ?? false)}</p>
-              <p><strong>Prob. falso positivo:</strong> {parseGeminiAnalysis(selectedEvent.gemini_analysis).probabilidad_falso_positivo ?? 'N/A'}</p>
-              <p><strong>Recomendación:</strong> {parseGeminiAnalysis(selectedEvent.gemini_analysis).recomendacion_operador || 'N/A'}</p>
-              <p><strong>Razones:</strong></p>
-              <ul>
-                {(parseGeminiAnalysis(selectedEvent.gemini_analysis).razones || []).map((r, idx) => <li key={idx}>{r}</li>)}
-              </ul>
-              <p><strong>Objetos relevantes:</strong> {(parseGeminiAnalysis(selectedEvent.gemini_analysis).objetos_relevantes || []).join(', ') || 'N/A'}</p>
-            </div>
-          )}
-        </section>
-      )}
-    </div>
-  )
-}
-
-function KPI({ title, value }) {
-  return <article className="kpi"><h3>{title}</h3><p>{value}</p></article>
+  return <div className='shell'><aside className='sidebar'><h2>🛰️ Control Center</h2><nav>{['Dashboard', 'Alertas', 'Cámaras', 'Mapa', 'Analítica', 'Configuración'].map((i) => <a key={i}>{i}</a>)}</nav><p className='muted'>Supabase: {connection}</p></aside><main className='main'>
+    <header className='topbar'><div><h1>Centro de Control Inteligente</h1><p>Monitoreo en vivo con IA y Supabase Realtime</p></div><div className='top-actions'><span className={`badge ${connection === 'live' ? 'confirmed' : 'pending'}`}>{connection}</span><button onClick={loadData}>Actualizar</button><span>{new Date().toLocaleTimeString()}</span></div></header>
+    {!hasSupabaseCredentials && <div className='warning'>Configura VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY.</div>}{error && <div className='warning'>{error}</div>}
+    <section className='kpi-grid'><KpiCard title='Alertas hoy' value={kpis.today} hint='Últimas 24h' /><KpiCard title='Críticas' value={kpis.critical} hint='Prioridad máxima' tone='critical' /><KpiCard title='Pendientes' value={kpis.pending} hint='Requieren acción' /><KpiCard title='Falsos positivos' value={kpis.falsePositive} hint='Calidad de IA' /><KpiCard title='Cámaras activas' value={kpis.activeCameras} hint='Online' /><KpiCard title='Última alerta' value={kpis.lastAlert ? formatTime(kpis.lastAlert) : 'N/A'} hint='Tiempo real' /></section>
+    <section className='workspace'><section className='panel'><div className='panel-head'><h3>Alertas en vivo</h3><div><button onClick={() => setView('cards')}>Cards</button><button onClick={() => setView('table')}>Tabla</button></div></div><div className='filters'><input placeholder='Buscar descripción/ubicación' onChange={(e) => setFilters((f) => ({ ...f, query: e.target.value }))} /><select onChange={(e) => setFilters((f) => ({ ...f, camera: e.target.value }))}><option value='all'>Todas las cámaras</option>{[...new Set(events.map((e) => e.camera_id || e.camera_name).filter(Boolean))].map((c) => <option key={c} value={c}>{c}</option>)}</select><select onChange={(e) => setFilters((f) => ({ ...f, priority: e.target.value }))}><option value='all'>Prioridad</option>{[0, 1, 2, 3, 4, 5].map((p) => <option key={p} value={String(p)}>{p}</option>)}</select></div>{loading ? <p>Cargando...</p> : filteredEvents.length === 0 ? <p className='muted'>No hay alertas con filtros actuales.</p> : view === 'cards' ? <div className='cards'>{filteredEvents.map((event) => <AlertCard key={event.id} event={event} onSelect={setSelectedEvent} onAction={updateEventStatus} />)}</div> : <AlertsTable events={filteredEvents} onSelect={setSelectedEvent} />}</section>
+    <aside className='right'><AlertDetailPanel event={selectedEvent} onAction={updateEventStatus} /><section className='panel'><h3>Mapa/lista cámaras MVP</h3>{camerasDerived.map((c) => <div key={c.id} className='list-item'><strong>{c.name || c.id}</strong><small>{c.address || c.location || 'Sin ubicación'}</small></div>)}</section><section className='panel'><h3>Estado de cámaras</h3>{camerasDerived.map((c) => { const hb = heartbeats.find((h) => h.camera_id === c.id); return <div key={c.id} className='list-item'><span>{c.name || c.id}</span><small>{hb ? `${hb.status || 'ok'} · ${formatTime(hb.created_at)}` : 'Sin heartbeat'}</small></div> })}</section></aside></section>
+  </main></div>
 }
