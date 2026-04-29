@@ -1,17 +1,36 @@
-# React + Vite
+# Hackaton Dashboard Interactivo
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Dashboard React + Vite para monitoreo de eventos de seguridad en tiempo real usando Supabase.
 
-Currently, two official plugins are available:
+## Variables de entorno
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Crea un archivo `.env`:
 
-## React Compiler
+```bash
+VITE_SUPABASE_URL=https://<tu-proyecto>.supabase.co
+VITE_SUPABASE_ANON_KEY=<tu-anon-key>
+VITE_SUPABASE_STORAGE_BUCKET=security-snapshots
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Soporte de imágenes
 
-## Expanding the ESLint configuration
+El dashboard intenta renderizar la imagen en este orden:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
-# hackatondashboardinteractivo
+1. `image_url` o `snapshot_url` (URL completa `https://...`)
+2. `image_path`, `storage_path`, `snapshot_path`, `file_path` o `image_key` (ruta dentro del bucket)
+
+Cuando llega una ruta relativa, la app intenta:
+
+- crear `signed URL` (funciona en buckets privados)
+- fallback a `public URL` (funciona en buckets públicos)
+
+## Ejecutar
+
+```bash
+npm install
+npm run dev
+```
+
+## SQL
+
+Aplica `supabase/schema.sql` en Supabase SQL Editor para crear/actualizar tablas, vista y políticas RLS.
