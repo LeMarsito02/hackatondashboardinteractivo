@@ -46,6 +46,23 @@ async function enrichEvent(event) {
   return { ...event, _resolvedImageUrl: resolvedImage }
 }
 
+
+
+function parseGeminiAnalysis(raw) {
+  if (!raw) return null
+  if (typeof raw === 'object') return raw
+  if (typeof raw !== 'string') return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+function eventDescription(event) {
+  const analysis = parseGeminiAnalysis(event.gemini_analysis)
+  return analysis?.descripcion || event.gemini_description || event.description || 'Sin descripción'
+}
 export default function App() {
   const [events, setEvents] = useState([])
   const [cameras, setCameras] = useState([])
@@ -212,7 +229,7 @@ export default function App() {
                   <p><strong>Ubicación:</strong> {event.address || 'Sin dirección'}</p>
                   <p><strong>Prioridad:</strong> {priority}/5</p>
                   <p><strong>Nivel:</strong> <span style={{ color: level.color }}>{level.label}</span></p>
-                  <p><strong>Gemini:</strong> {event.gemini_description || event.description || 'Sin descripción'}</p>
+                  <p><strong>Gemini:</strong> {eventDescription(event)}</p>
                   <p><strong>Estado:</strong> {event.status || 'pending'}</p>
                   <p><strong>Hora:</strong> {formatTime(event.created_at)}</p>
                   <div className="buttons" onClick={(e) => e.stopPropagation()}>
@@ -252,9 +269,22 @@ export default function App() {
           {selectedEvent._resolvedImageUrl && <img className="detail-image" src={selectedEvent._resolvedImageUrl} alt="Detalle evento" />}
           <p><strong>ID:</strong> {selectedEvent.id}</p>
           <p><strong>Cámara:</strong> {selectedEvent.camera_name || selectedEvent.camera_id}</p>
-          <p><strong>Descripción Gemini:</strong> {selectedEvent.gemini_description || 'Sin descripción'}</p>
+          <p><strong>Descripción Gemini:</strong> {eventDescription(selectedEvent)}</p>
           <p><strong>Objetos detectados:</strong> {selectedEvent.detected_objects?.join(', ') || 'Sin objetos'}</p>
           <p><strong>Notas operador:</strong> {selectedEvent.operator_notes || 'Sin notas'}</p>
+          {parseGeminiAnalysis(selectedEvent.gemini_analysis) && (
+            <div className="analysis-box">
+              <p><strong>Tipo de emergencia:</strong> {parseGeminiAnalysis(selectedEvent.gemini_analysis).tipo_emergencia || 'N/A'}</p>
+              <p><strong>Emergencia detectada:</strong> {String(parseGeminiAnalysis(selectedEvent.gemini_analysis).emergencia_detectada ?? false)}</p>
+              <p><strong>Prob. falso positivo:</strong> {parseGeminiAnalysis(selectedEvent.gemini_analysis).probabilidad_falso_positivo ?? 'N/A'}</p>
+              <p><strong>Recomendación:</strong> {parseGeminiAnalysis(selectedEvent.gemini_analysis).recomendacion_operador || 'N/A'}</p>
+              <p><strong>Razones:</strong></p>
+              <ul>
+                {(parseGeminiAnalysis(selectedEvent.gemini_analysis).razones || []).map((r, idx) => <li key={idx}>{r}</li>)}
+              </ul>
+              <p><strong>Objetos relevantes:</strong> {(parseGeminiAnalysis(selectedEvent.gemini_analysis).objetos_relevantes || []).join(', ') || 'N/A'}</p>
+            </div>
+          )}
         </section>
       )}
     </div>
