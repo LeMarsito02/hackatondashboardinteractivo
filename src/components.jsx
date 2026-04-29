@@ -1,4 +1,4 @@
-import { formatAiSummary, formatRelative, formatTime, levelFromPriority, statusTone } from './utils/dashboard'
+import { formatAiSummary, formatRelative, formatTime, getBestAiText, levelFromPriority, statusTone } from './utils/dashboard'
 
 export const StatusBadge = ({ status, falsePositive }) => <span className={`badge status ${statusTone(status, falsePositive)}`}>{falsePositive ? 'false_positive' : status || 'pending'}</span>
 export const PriorityBadge = ({ priority }) => { const level = levelFromPriority(priority); return <span className={`badge priority ${level.tone}`}>{level.label} · {priority}/5</span> }
@@ -6,7 +6,7 @@ export const KpiCard = ({ title, value, hint, tone='default' }) => <article clas
 
 export function AlertCard({ event, onSelect, onAction }) {
   const priority = event.final_priority ?? event.priority ?? 0
-  const ai = formatAiSummary(event.ai_description || event.gemini_description || event.description)
+  const ai = formatAiSummary(getBestAiText(event))
   return <article className='alert-card' onClick={() => onSelect(event)}>
     {event._resolvedImageUrl ? <img src={event._resolvedImageUrl} alt='evento' /> : <div className='image-placeholder'>Sin imagen</div>}
     <div className='alert-body'>
@@ -28,6 +28,6 @@ export const AlertsTable = ({ events, onSelect }) => <div className='table-wrap'
 
 export const AlertDetailPanel = ({ event, onAction }) => {
   if (!event) return <section className='panel'><h3>Detalle de alerta</h3><p className='muted'>Selecciona una alerta para ver su detalle.</p></section>
-  const ai = formatAiSummary(event.ai_description || event.gemini_description || event.description)
+  const ai = formatAiSummary(getBestAiText(event))
   return <section className='panel'><h3>Detalle de alerta seleccionada</h3>{event._resolvedImageUrl && <img className='detail-image' src={event._resolvedImageUrl} alt='detalle' />}<p><b>Cámara:</b> {event.camera_name || event.camera_id}</p><p><b>Ubicación:</b> {event.address || event.location || 'N/A'}</p><p><b>Descripción IA:</b> {ai.technical || ai.summary}</p>{ai.hasTechnical && <details><summary>Ver detalle técnico</summary><pre>{ai.technical}</pre></details>}<div className='buttons'><button onClick={() => onAction(event, 'confirmed', false, true)}>Confirmar</button><button onClick={() => onAction(event, 'false_positive', true, false)}>Falso positivo</button><button onClick={() => onAction(event, 'resolved')}>Revisado</button></div></section>
 }

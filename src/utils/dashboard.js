@@ -25,7 +25,7 @@ export const isAiError = (text = '') => {
 
 export function formatAiSummary(raw) {
   const text = typeof raw === 'string' ? raw : raw ? JSON.stringify(raw) : ''
-  if (!text) return { summary: 'Sin análisis IA disponible.', technical: '' }
+  if (!text) return { summary: 'Sin descripción reportada.', technical: '' }
   if (isAiError(text)) {
     return {
       summary: 'Análisis IA no disponible por límite de cuota.',
@@ -38,6 +38,29 @@ export function formatAiSummary(raw) {
     technical: text.length > 160 ? text : '',
     hasTechnical: text.length > 160,
   }
+}
+
+export function parseGeminiAnalysis(raw) {
+  if (!raw) return null
+  if (typeof raw === 'object') return raw
+  if (typeof raw !== 'string') return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+export function getBestAiText(event) {
+  const parsed = parseGeminiAnalysis(event?.gemini_analysis)
+  return (
+    parsed?.descripcion ||
+    parsed?.resumen ||
+    event?.ai_description ||
+    event?.gemini_description ||
+    event?.description ||
+    ''
+  )
 }
 
 export function statusTone(status, falsePositive) {
